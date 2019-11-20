@@ -8,7 +8,10 @@ Included commands:
 Get-DRAActiveViewRule  
 Get-DRAAssistantAdmin  
 Get-DRAAssistantAdminRule  
+Get-DRADelegation  
+Get-DRAPower  
 Get-DRARole  
+Get-DRAServer  
 Grant-DRADelegation  
 New-DRAActiveView  
 New-DRAActiveViewActiveViewRule  
@@ -27,6 +30,7 @@ Rename-DRAActiveView
 Rename-DRAActiveViewRule  
 Rename-DRAAssistantAdmin  
 Rename-DRAAssistantAdminRule  
+Rename-DRARole  
 Revoke-DRADelegation  
 Set-DRAActiveViewComment  
 Set-DRAActiveViewDescription  
@@ -35,26 +39,19 @@ Set-DRAAssistantAdminComment
 Set-DRAAssistantAdminDescription  
 Set-DRAAssistantAdminRuleComment**
 
-I wrote this module mainly because the EA.exe command-line interface is awkward and difficult to use.
+I wrote this module mainly because the EA.exe command-line interface is awkward and difficult to use. This module also adds some features missing from EA.exe (e.g., **Get-DRADelegation**).
 
 ## System Requirements
 
 * Windows 7/Windows Server 2008 R2 or later
 * Windows PowerShell 3.0 or later
-* DRA client installation including the **Command-line interface** feature
+* DRA server installation including the **Command-line interface** feature (only tested on DRA 9.2)
 
-On Windows 7/Windows Server 2008 R2, Windows Management Framework (WMF) 3.0 or later is required to meet the Windows PowerShell prerequisite. The DRA client installation with the **Command-line interface** feature is required because the module is a "wrapper" that automates the EA.exe command.
+On Windows 7/Windows Server 2008 R2, Windows Management Framework (WMF) 3.0 or later is required to meet the Windows PowerShell prerequisite. The DRA server must be installed with the **Command-line interface** feature.
 
 ## Installation
 
 Choose **Releases** and download and run the installer.
-
-## Limitations
-
-* Module is limited to what's available in EA.exe
-* Module speed is limited by performance of EA.exe
-* All actions connect to the primary server, so recommendation is only to use this module on primary server or server in same site as primary with a fast network connection
-* ActiveView resource rules are not supported
 
 ## Contributions
 

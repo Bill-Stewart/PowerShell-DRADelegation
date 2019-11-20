@@ -1,43 +1,95 @@
-# DRADelegation.psm1
-# Written by Bill Stewart for IHS
+# DRADelegation.psm1 Written by Bill Stewart
 #
-# Provides a PowerShell interface for getting and setting DRA delegation
-# details (ActiveViews, AssistantAdmins, and Roles). The module is a wrapper for
-# the EA.exe command-line interface.
+# Provides a PowerShell interface for getting and setting MicroFocus/NetIQ DRA
+# delegation details (ActiveViews, AssistantAdmins, and Roles). For the most
+# part the module is a wrapper for the EA.exe command-line interface. Some of
+# the functions use the DRA COM objects. (The COM interfaces are not documented
+# for customers, but I managed to cobble some functionality together based on
+# some info from the DRA developers and from viewing the DRA admin service
+# logs.)
 #
-# For output operations, the module captures the output of the EA.exe command,
-# parses it, and outputs as PowerShell objects that can be filtered, sorted,
-# etc. Pipeline operations are supported and should work as expected.
+# For output operations that use EA.exe, the module captures the output of the
+# command, parses it, and outputs as PowerShell objects that can be filtered,
+# sorted, etc. Pipeline operations are supported and should work as expected.
 #
 # The module uses Write-Progress to show the EA.exe command line in cases of
 # slow operations. The EA.exe command line is also shown when debug is enabled.
 #
-# Prerequisite:
-# * DRA client installation including the "Command-line interface" feature
+# Prerequisites:
+# * Current computer must be a DRA server
+# * The "command-line interface" feature must be installed
+# * DRA 9.2 (or later?)
 #
 # Current limitations:
 #
-# * Module is limited to what's available in EA.exe
-# * Module speed is limited by performance of EA.exe
-# * All actions connect to the primary server, so recommendation is only to use
-#   this module on primary server or server in same site as primary with a fast
-#   network connection
-# * ActiveView resource rules are not supported
+# * Requires DRA 9.2 (or later?).
+#
+# * The module uses EA.exe for many actions, so it can be somewhat slow if
+#   EA.exe gets called repeatedly (still faster than point-and-click, though).
+#
+# * Errors from EA.exe actions are parsed from its output, so if the EA.exe
+#   output format changes, the module may behave incorrectly in various ways.
+#
+# * The module only discovers DRA servers in the current domain.
+#
+# * All actions connect to the primary server, so it's recommended only to use
+#   this module on the primary server or server in same site as primary with a
+#   fast network connection.
+#
+# * The EA.exe error messages don't align well with the PowerShell objects, but
+#   they should give enough information to tell what's wrong.
+#
+# * The Get-DRADelegation "Role" property can contain Power assignments (Power
+#   assignments are read-only for purposes of the module). For this reason,
+#   it's recommended to only create delegations using Role objects. (If you
+#   need a delegation for a single Power, create a Role for it.)
+#
+# * DRA Power objects have limited visibility and are read-only (we have
+#   Get-DRAPower and enumeration of assigned Power objects in
+#   Get-DRADelegation, but that's all for now).
+#
+# * ActiveView resource rules are not supported.
+#
+# * Messages are not localized (English only).
 #
 # Version history:
 #
-# 1.0 (2019-09-17)
+# 1.0 (2019-09-16)
 # * Initial version.
+#
+# 1.5 (2019-11-20)
+# * Replaced Out-Object with [PSCustomObject] (PSv3 is prerequisite)
+# * Added support for COM object interface
+# * Changed GetDRAObject and GetDRAObjectRule functions to use COM object
+#   interface (this is an improvement because objects are output as they get
+#   enumerated; previously when parsing EA.exe output, we would have to collect
+#   ALL output up front before parsing, which makes the module feel less
+#   responsive to the user)
+# * "Type" property of Get-* renamed to "Builtin" and changed from string
+#   ("Built-in" or "Custom") to boolean
+# * "Assigned" property of Get-* changed from string ("Yes" or "No") to boolean
+# * Added Get-DRADelegation (uses COM as EA.exe does not support)
+# * Added Get-DRAPower (uses COM as EA.exe does not support)
+# * Added Rename-DRARole (uses COM as EA.exe does not support)
+# * Get-DRAActiveViewRule -ActiveView parameter has "*" as default
+# * Get-DRAAssistantAdminRule -AssistantAdmin parameter has "*" as default
+# * Added "AV" as parameter alias for "ActiveView"
+# * Added "AA" as parameter alias for "AssistantAdmin"
+# * Added pipeline inputs to Get-*
+# * Cleaned up error handling (correct object names, etc.)
 
 #requires -version 3
 
+#------------------------------------------------------------------------------
+# CATEGORY: Initialization
+#------------------------------------------------------------------------------
 $DRAInstallDir = Get-ItemProperty "HKLM:\SOFTWARE\WOW6432Node\Mission Critical Software\OnePoint\Administration" -ErrorAction SilentlyContinue
 if ( -not $DRAInstallDir ) {
   $DRAInstallDir = Get-ItemProperty "HKLM:\SOFTWARE\Mission Critical Software\OnePoint\Administration" -ErrorAction SilentlyContinue
 }
 $DRAInstallDir = $DRAInstallDir.InstallDir
 if ( -not $DRAInstallDir ) {
-  throw "Unable to find DRA client installation on this computer."
+  throw "This module requires that the current computer be a DRA server."
 }
 
 $EA = Join-Path $DRAInstallDir "EA.exe"
@@ -45,25 +97,39 @@ if ( -not (Test-Path $EA) ) {
   throw "Unable to find '$EA'. This module requires the DRA command-line interface to be installed."
 }
 
-# Always use primary server?
-$FORCE_PRIMARY = $true
-
-#------------------------------------------------------------------------------
-# CATEGORY: Miscellaneous
-#------------------------------------------------------------------------------
-function Out-Object {
-  param(
-    [Collections.Hashtable[]] $hashData
-  )
-  $order = @()
-  $result = @{}
-  $hashData | ForEach-Object {
-    $order += ($_.Keys -as [Array])[0]
-    $result += $_
-  }
-  New-Object PSObject -Property $result | Select-Object $order
+try {
+  [Void] (New-Object -ComObject "EAServer.EAServe")
+}
+catch {
+  throw "This module requires that the current computer be a DRA server."
 }
 
+# Always use primary server?
+$FORCE_PRIMARY = $true
+#------------------------------------------------------------------------------
+
+#------------------------------------------------------------------------------
+# CATEGORY: Pathname object support
+#------------------------------------------------------------------------------
+$ADS_ESCAPEDMODE_ON = 2
+$ADS_SETTYPE_DN = 4
+$ADS_FORMAT_X500_DN = 7
+
+$Pathname = New-Object -ComObject "Pathname"
+[Void] $Pathname.GetType().InvokeMember("EscapedMode","SetProperty",$null,$Pathname,$ADS_ESCAPEDMODE_ON)
+
+function Get-EscapedName {
+  param(
+    [String] $distinguishedName
+  )
+  [Void] $Pathname.GetType().InvokeMember("Set","InvokeMethod",$null,$Pathname,($distinguishedName,$ADS_SETTYPE_DN))
+  $Pathname.GetType().InvokeMember("Retrieve","InvokeMethod",$null,$Pathname,$ADS_FORMAT_X500_DN)
+}
+#------------------------------------------------------------------------------
+
+#------------------------------------------------------------------------------
+# CATEGORY: Parameter validation support
+#------------------------------------------------------------------------------
 function Get-EAParamName {
   param(
     [String] $objectType
@@ -164,6 +230,91 @@ function Get-ValidListParameter {
 #------------------------------------------------------------------------------
 
 #------------------------------------------------------------------------------
+# CATEGORY: DRA server discovery
+#------------------------------------------------------------------------------
+# EXPORT
+function Get-DRAServer {
+  <#
+  .SYNOPSIS
+  Gets information about DRA servers in the current domain.
+
+  .DESCRIPTION
+  Gets information about DRA servers in the current domain.
+
+  .PARAMETER Site
+  Specifies to get information about DRA servers in the current site.
+
+  .PARAMETER All
+  Specifies to get information about DRA servers in the current domain.
+
+  .PARAMETER Primary
+  Specifies to get information about the primary DRA server.
+
+  .INPUTS
+  None
+
+  .OUTPUTS
+  None
+  #>
+  [CmdletBinding(DefaultParameterSetName = "Site")]
+  param(
+    [Parameter(ParameterSetName = "Site")]
+    [Switch] $Site,
+
+    [Parameter(ParameterSetName = "All",Mandatory = $true)]
+    [Switch] $All,
+
+    [Parameter(ParameterSetName = "Primary",Mandatory = $true)]
+    [Switch] $Primary
+  )
+  try {
+    $defaultNC = ([ADSI] "LDAP://rootDSE").Get("defaultNamingContext")
+  }
+  catch [Runtime.InteropServices.COMException] {
+    throw $_
+  }
+  # Get container containing DRA serviceConnectionPoint objects
+  $scpContainer = [ADSI] "LDAP://CN=DraServer,CN=System,$defaultNC"
+  if ( -not $scpContainer.Children ) {
+    throw [Management.Automation.ItemNotFoundException] "Unable to discover DRA servers."
+  }
+  $draServers = New-Object Collections.Generic.List[PSObject]
+  foreach ( $dirEntry in $scpContainer.Children ) {
+    $keywords = ($dirEntry.Properties["keywords"] -join [System.Environment]::NewLine) | ConvertFrom-StringData
+    [Void] $draServers.Add([PSCustomObject] @{
+      "Name"    = $dirEntry.Properties["name"][0]
+      "Domain"  = $keywords["Domain"]
+      "Forest"  = $keywords["Forest"]
+      "Site"    = $keywords["Site"]
+      "Type"    = $keywords["Type"]
+      "Version" = [Version] $keywords["Version"]
+    })
+  }
+  switch ( $PSCmdlet.ParameterSetName ) {
+    "Site" {
+      # Get list of DRA servers in current site
+      $draServersInSite = $draServers | Where-Object { $_.Site -eq [DirectoryServices.ActiveDirectory.ActiveDirectorySite]::GetComputerSite().Name }
+      # If no DRA servers in current site, get list of all DRA servers
+      if ( -not $draServersInSite ) {
+        $draServersInSite = $draServers
+      }
+      $draServersInSite
+    }
+    "All" {
+      $draServers
+    }
+    "Primary" {
+      # Output only the primary DRA server
+      $draServers | Where-Object { ($_.Type -eq "Primary") }
+    }
+  }
+}
+
+# Abort module load if we can't discover any DRA servers
+[Void] (Get-DRAServer -All)
+#------------------------------------------------------------------------------
+
+#------------------------------------------------------------------------------
 # CATEGORY: Executable processing
 #------------------------------------------------------------------------------
 
@@ -173,7 +324,7 @@ function ConvertTo-Array {
   param(
     [String] $stringToConvert
   )
-  $stringWithoutTrailingNewLine = $stringToConvert -replace '(\r\n)*$', ''
+  $stringWithoutTrailingNewLine = $stringToConvert -replace '(\r\n)*$',''
   if ( $stringWithoutTrailingNewLine.Length -gt 0 ) {
     return ,($stringWithoutTrailingNewLine -split [Environment]::NewLine)
   }
@@ -274,53 +425,116 @@ function GetDRAObject {
   [CmdletBinding()]
   param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("ActiveView","AssistantAdmin","Role")]
+    [ValidateSet("ActiveView","AssistantAdmin","Power","Role")]
     [String] $objectType,
 
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
-    [String] $objectName
+    [String] $objectName,
+
+    [String] $draServerName,
+
+    [Switch] $emptyIsError
   )
-  $output = $null
-  $result = Invoke-EA "/DELI:TAB",(Get-EAParamName $objectType),$objectName,"DISPLAY","ALL" ([Ref] $output)
-  if ( $result -eq 0 ) {
-    switch ( $objectType ) {
-      "ActiveView" {
-        $output | Select-String '^(.+)\tComment:"(.*)"\tDescription:"(.*)"\tType:"(.*)"' | ForEach-Object {
-          Out-Object `
-            @{"ActiveView"  = $_.Matches[0].Groups[1].Value},
-            @{"Comment"     = $_.Matches[0].Groups[2].Value},
-            @{"Description" = $_.Matches[0].Groups[3].Value},
-            @{"Type"        = $_.Matches[0].Groups[4].Value}
+  if ( -not $FORCE_PRIMARY ) {
+    if ( -not $draServerName ) {
+      $draServerName = (Get-DRAServer | Get-Random).Name
+    }
+  }
+  else {
+    $draServerName = (Get-DRAServer -Primary).Name
+  }
+  $eaType = [Type]::GetTypeFromProgID("EAServer.EAServe",$draServerName)
+  if ( -not $eaType ) {
+    throw [Management.Automation.ItemNotFoundException] "Computer '$draServerName' is not a DRA server, or is not reachable."
+  }
+  try {
+    $eaServer = [Activator]::CreateInstance($eaType)
+    $varSetIn = New-Object -ComObject "NetIQDraVarSet.VarSet"
+  }
+  catch [Management.Automation.MethodInvocationException],[Runtime.InteropServices.COMException] {
+    throw $_
+  }
+  Write-Debug "GetDRAObject: Connect to server '$draServerName'"
+  switch ( $objectType ) {
+    "ActiveView" {
+      $container = "OnePoint://module=security"
+      $filter = @("ActiveView(`$McsNameValue='$objectName')")
+      $andFilter = $null
+    }
+    "AssistantAdmin" {
+      $container = "OnePoint://module=security"
+      $filter = @("AssistantAdmin(`$McsNameValue='$objectName')")
+      $andFilter = @("AssistantAdmin(`$McsHidden='0'),AssistantAdmin(type='assistantadmin')")
+    }
+    "Power" {
+      $container = "OnePoint://module=operations"
+      $filter = @("PowerTemplate(`$McsNameValue='$objectName')")
+      $andFilter = @("PowerTemplate(`$McsIsHidden='false')")
+    }
+    "Role" {
+      $container = "OnePoint://module=security"
+      $Filter = @("Role(`$McsNameValue='$objectName')")
+      $andFilter = $null
+    }
+  }
+  $varSetIn.put("Hints",@('$McsNameValue','Description','Comment','$McsSysFlag','$McsIsAssigned'))
+  $varSetIn.put("OperationName","ContainerEnum")
+  $varSetIn.put("Scope",0)
+  $varSetIn.put("ManagedObjectsOnly",$true)
+  $varSetIn.put("Container",$container)
+  $varSetIn.put("Filter",$filter)
+  if ( $andFilter ) { $varSetIn.put("AndFilter",$andFilter) }
+  $varSetOut = $eaServer.ScriptSubmit($varSetIn)
+  $lastError = $varSetOut.Get("Errors.LastError")
+  if ( $lastError -eq 0 ) {
+    $objectCount = $varSetOut.Get("TotalNumberObjects")
+    if ( $objectCount -gt 0 ) {
+      $tableBuffer = $varSetOut.Get("IEaEnumerateBuf")
+      if ( $tableBuffer ) {
+        for ( $i = 0; $i -lt $tableBuffer.NumberOfRows; $i++ ) {
+          $outObj = [PSCustomObject] @{
+            $objectType   = $null
+            "Description" = $null
+            "Comment"     = $null
+            "Builtin"     = $null
+          }
+          if ( ($objectType -eq "AssistantAdmin") -or ($objectType -eq "Role") ) {
+            $outObj | Add-Member NoteProperty "Assigned" $null
+          }
+          for ( $j = 0; $j -lt $tableBuffer.NumberOfColumns; $j++ ) {
+            $fieldValue = $null
+            $tableBuffer.GetField([Ref] $fieldValue)
+            switch ( $j ) {
+              0 { $outObj.$objectType = $fieldValue }
+              1 { $outObj.Description = $fieldValue }
+              2 { $outObj.Comment     = $fieldValue }
+              3 { $outObj.Builtin     = $fieldValue -as [Boolean] }
+              4 {
+                  if ( ($outObj.PSObject.Properties | Select-Object -ExpandProperty Name) -contains "Assigned" ) {
+                    $outObj.Assigned = $fieldValue
+                  }
+              }
+            }
+          }
+          $outObj
+          $tableBuffer.NextRow()
         }
       }
-      "AssistantAdmin" {
-        $output | Select-String '^(.+)\tComment:"(.*)"\tDescription:"(.*)"\tType:"(.*)"\tAssigned:"(.*)"' | ForEach-Object {
-          Out-Object `
-            @{"AssistantAdmin" = $_.Matches[0].Groups[1].Value},
-            @{"Comment"        = $_.Matches[0].Groups[2].Value},
-            @{"Description"    = $_.Matches[0].Groups[3].Value},
-            @{"Type"           = $_.Matches[0].Groups[4].Value},
-            @{"Assigned"       = $_.Matches[0].Groups[5].Value}
-        }
-      }
-      "Role" {
-        $output | Select-String '^(.+)\tComment:"(.*)"\tDescription:"(.*)"\tType:"(.*)"\tAssigned:"(.*)"' | ForEach-Object {
-          Out-Object `
-            @{"Role"        = $_.Matches[0].Groups[1].Value},
-            @{"Comment"     = $_.Matches[0].Groups[2].Value},
-            @{"Description" = $_.Matches[0].Groups[3].Value},
-            @{"Type"        = $_.Matches[0].Groups[4].Value},
-            @{"Assigned"    = $_.Matches[0].Groups[5].Value}
-        }
+    }
+    else {
+      if ( $emptyIsError ) {
+        (Get-Variable PSCmdlet -Scope 1).Value.WriteError((New-Object Management.Automation.ErrorRecord "DRA $objectType '$objectName' not found.",
+        (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
+        ([Management.Automation.ErrorCategory]::ObjectNotFound),
+        $objectName))
       }
     }
   }
   else {
-    $OFS = [Environment]::NewLine
-    $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord "$output",
+    $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord ("GetDRAObject returned error 0x{0:X8}." -f $lastError),
       (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
-      ([Management.Automation.ErrorCategory]::ObjectNotFound),
+      ([Management.Automation.ErrorCategory]::NotSpecified),
       $objectName))
   }
 }
@@ -338,25 +552,27 @@ function Get-DRAActiveView {
   Specifies the name of one or more ActiveView objects. This parameter supports wildcards ('?' and '*').
 
   .INPUTS
-  System.String
+  * System.String
+  * Objects with property 'ActiveView'
 
   .OUTPUTS
   Objects with the following properties:
     ActiveView   The name of the ActiveView object
-    Comment      The object's comment
     Description  The object's description
-    Type         The object's type (Built-in or Custom)
+    Comment      The object's comment
+    Builtin      True if a built-in DRA object, or False otherwise
   #>
   param(
-    [Parameter(ValueFromPipeline = $true)]
+    [Parameter(ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
     [SupportsWildcards()]
+    [Alias("AV")]
     [String[]] $ActiveView = "*"
   )
   process {
     foreach ( $activeViewItem in $ActiveView ) {
       try {
-        GetDRAObject "ActiveView" $activeViewItem
+        GetDRAObject "ActiveView" $activeViewItem -emptyIsError
       }
       catch {
         $PSCmdlet.WriteError($_)
@@ -378,25 +594,28 @@ function Get-DRAAssistantAdmin {
   Specifies the name of one or more AssistantAdmin objects. This parameter supports wildcards ('?' and '*').
 
   .INPUTS
-  System.String
+  * System.String
+  * Objects with property 'AssistantAdmin'
 
   .OUTPUTS
   Objects with the following properties:
     AssistantAdmin  The name of the AssistantAdmin object
-    Comment         The object's comment
     Description     The object's description
-    Type            The object's type (Built-in or Custom)
+    Comment         The object's comment
+    Builtin         True if a built-in DRA object, or False otherwise
+    Assigned        True if assigned in a delegation, or False otherwise
   #>
   param(
-    [Parameter(ValueFromPipeline = $true)]
+    [Parameter(ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
     [SupportsWildcards()]
+    [Alias("AA")]
     [String[]] $AssistantAdmin = "*"
   )
   process {
     foreach ( $assistantAdminItem in $AssistantAdmin ) {
       try {
-        GetDRAObject "AssistantAdmin" $assistantAdminItem
+        GetDRAObject "AssistantAdmin" $assistantAdminItem -emptyIsError
       }
       catch {
         $PSCmdlet.WriteError($_)
@@ -418,17 +637,19 @@ function Get-DRARole {
   Specifies the name of one or more DRA Role objects. This parameter supports wildcards ('?' and '*').
 
   .INPUTS
-  System.String
+  * System.String
+  * Objects with property 'Role'
 
   .OUTPUTS
   Objects with the following properties:
     Role         The name of the Role object
-    Comment      The object's comment
     Description  The object's description
-    Type         The object's type (Built-in or Custom)
+    Comment      The object's comment
+    Builtin      True if a built-in DRA object, or False otherwise
+    Assigned     True if assigned in a delegation, or False otherwise
   #>
   param(
-    [Parameter(ValueFromPipeline = $true)]
+    [Parameter(ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
     [SupportsWildcards()]
     [String[]] $Role = "*"
@@ -436,10 +657,156 @@ function Get-DRARole {
   process {
     foreach ( $roleItem in $Role ) {
       try {
-        GetDRAObject "Role" $roleItem
+        GetDRAObject "Role" $roleItem -emptyIsError
       }
       catch {
         $PSCmdlet.WriteError($_)
+      }
+    }
+  }
+}
+
+# EXPORT
+function Get-DRAPower {
+  <#
+  .SYNOPSIS
+  Gets information about DRA Power objects.
+
+  .DESCRIPTION
+  Gets information about DRA Power objects.
+
+  .PARAMETER Role
+  Specifies the name of one or more DRA Power objects. This parameter supports wildcards ('?' and '*').
+
+  .INPUTS
+  System.String
+
+  .OUTPUTS
+  Objects with the following properties:
+    Power        The name of the Power object
+    Description  The object's description
+    Comment      The object's comment
+    Builtin      True if a built-in DRA object, or False otherwise
+  #>
+  param(
+    [Parameter(ValueFromPipeline = $true)]
+    [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
+    [SupportsWildcards()]
+    [String[]] $Power = "*"
+  )
+  process {
+    foreach ( $powerItem in $Power ) {
+      try {
+        GetDRAObject "Power" $powerItem -emptyIsError
+      }
+      catch {
+        $PSCmdlet.WriteError($_)
+      }
+    }
+  }
+}
+#------------------------------------------------------------------------------
+
+#------------------------------------------------------------------------------
+# CATEGORY: Get delegation info
+#------------------------------------------------------------------------------
+# EXPORT
+function Get-DRADelegation {
+  <#
+  .SYNOPSIS
+  Gets information about DRA delegations.
+
+  .DESCRIPTION
+  Gets information about DRA delegations.
+
+  .PARAMETER AssistantAdmin
+  Specifies the name of one or more DRA AssistantAdmin objects. This parameter supports wildcards ('?' and '*').
+
+  .INPUTS
+  * System.String
+  * Objects with property 'AssistantAdmin'
+
+  .OUTPUTS
+  Objects with the following properties:
+    AssistantAdmin  The AssistantAdmin to which the delegation applies
+    Role            The delegated Role (or Power)
+    ActiveView      The ActiveView over which the delegation applies
+  #>
+  [CmdletBinding()]
+  param(
+    [Parameter(ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
+    [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
+    [SupportsWildcards()]
+    [Alias("AA")]
+    [String[]] $AssistantAdmin = "*"
+  )
+  begin {
+    if ( -not $FORCE_PRIMARY ) {
+      $draServerName = (Get-DRAServer | Get-Random).Name
+    }
+    else {
+      $draServerName = (Get-DRAServer -Primary).Name
+    }
+    $eaType = [Type]::GetTypeFromProgID("EAServer.EAServe",$draServerName)
+    if ( -not $eaType ) {
+      throw [Management.Automation.ItemNotFoundException] "Computer '$draServerName' is not a DRA server, or is not reachable."
+    }
+    try {
+      $eaServer = [Activator]::CreateInstance($eaType)
+      $varSetIn = New-Object -ComObject "NetIQDraVarSet.VarSet"
+    }
+    catch [Management.Automation.MethodInvocationException] {
+      throw $_
+    }
+    Write-Debug "Get-DRADelegation: Connect to server '$draServerName'"
+    $varSetIn.put("Hints",@('$McsNameValue'))
+    $varSetIn.put("OperationName","SecurityAssignmentEnum")
+    $varSetIn.put("Scope",0)
+    $varSetIn.put("Type","AdminAssignment")
+    $varSetIn.put("ManagedObjectsOnly",$true)
+    $varSetIn.put("ResumeStr","")
+    $varSetIn.put("nextrows",-1)
+  }
+  process {
+    foreach ( $assistantAdminItem in $AssistantAdmin ) {
+      $assistantAdminNames = GetDRAObject "AssistantAdmin" $assistantAdminItem -emptyIsError | Select-Object -ExpandProperty AssistantAdmin
+      foreach ( $assistantAdminName in $assistantAdminNames ) {
+        $varSetIn.put("AA","OnePoint://aa=$(Get-EscapedName $assistantAdminName),module=security")
+        $varSetOut = $eaServer.ScriptSubmit($varSetIn)
+        $lastError = $varSetOut.Get("Errors.LastError")
+        if ( $lastError -eq 0 ) {
+          $objectCount = $varSetOut.Get("TotalNumberObjects")
+          if ( $objectCount -gt 0 ) {
+            $tableBuffer = $varSetOut.Get("IEaEnumerateBuf")
+            if ( $tableBuffer ) {
+              for ( $i = 0; $i -lt $objectCount; $i++ ) {
+                $role = $null
+                $tableBuffer.GetField([Ref] $role)
+                $tableBuffer.NextRow()
+                $activeView = $null
+                $tableBuffer.GetField([Ref] $activeView)
+                $tableBuffer.NextRow()
+                [PSCustomObject] @{
+                  "AssistantAdmin" = $assistantAdminName
+                  "Role"           = $role
+                  "ActiveView"     = $activeView
+                }
+              }
+            }
+          }
+          else {
+            $PSCmdlet.WriteError((New-Object Management.Automation.ErrorRecord "DRA AssistantAdmin '$assistantAdminName' has no delegations.",
+            $MyInvocation.MyCommand.Name,
+            ([Management.Automation.ErrorCategory]::ObjectNotFound),
+            $assistantAdminName))
+          }
+        }
+        else {
+          $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord ("Get-DRADelegation returned error 0x{0:X8}." -f $lastError),
+            $MyInvocation.MyCommand.Name,
+            ([Management.Automation.ErrorCategory]::NotSpecified),
+            $assistantAdminName))
+        }
       }
     }
   }
@@ -460,49 +827,93 @@ function GetDRAObjectRule {
     [ValidateNotNullOrEmpty()]
     [String] $objectName,
 
-    [String] $ruleName
+    [String] $ruleName,
+
+    [String] $draServerName,
+
+    [Switch] $emptyIsError
   )
-  $output = $null
-  $result = Invoke-EA "/DELI:TAB",(Get-EAParamName $objectType),$objectName,"DISPLAYRULES",$ruleName,"ALL" ([Ref] $output)
-  if ( $result -eq 0 ) {
-    for ( $i = 0; $i -lt $output.Count; $i++ ) {
-      # Lines without leading whitespace give object type and name
-      if ( $output[$i] -match '^[^\s]' ) {
-        $output[$i] | Select-String '^(.+) ''(.+)''\.\.\.' | ForEach-Object {
-          # Construct output object
-          $outObj = Out-Object `
-            @{$_.Matches[0].Groups[1].Value = $_.Matches[0].Groups[2].Value},
-            @{"Rule"                        = $null},
-            @{"Description"                 = $null},
-            @{"Comment"                     = $null}
-        }
-      }
-      else {
-        if ( $output[$i] -notmatch 'not found\.$' ) {
-          # Update output object properties
-          $output[$i] | Select-String '^  (.+)\tdescription:"(.*)"\tcomment:"(.*)"' | ForEach-Object {
-            $outObj.Rule        = $_.Matches[0].Groups[1].Value
-            $outObj.Description = $_.Matches[0].Groups[2].Value
-            $outObj.Comment     = $_.Matches[0].Groups[3].Value
-          }
-          $outObj
-        }
-        else {
-          $name = [Regex]::Match($output[$i - 1],'''(.+)''').Groups[1].Value
-          (Get-Variable PSCmdlet -Scope 1).Value.WriteError((New-Object Management.Automation.ErrorRecord "Rule(s) matching '$ruleName' not found in DRA $objectType '$name'.",
-            (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
-            ([Management.Automation.ErrorCategory]::ObjectNotFound),
-            $objectName))
-        }
-      }
+  if ( -not $FORCE_PRIMARY ) {
+    if ( -not $draServerName ) {
+      $draServerName = (Get-DRAServer | Get-Random).Name
     }
   }
   else {
-    $OFS = [Environment]::NewLine
-    $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord "$output",
-      (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
-      ([Management.Automation.ErrorCategory]::ObjectNotFound),
-      $objectName))
+    $draServerName = (Get-DRAServer -Primary).Name
+  }
+  $eaType = [Type]::GetTypeFromProgID("EAServer.EAServe",$draServerName)
+  if ( -not $eaType ) {
+    throw [Management.Automation.ItemNotFoundException] "Computer '$draServerName' is not a DRA server, or is not reachable."
+  }
+  try {
+    $eaServer = [Activator]::CreateInstance($eaType)
+    $varSetIn = New-Object -ComObject "NetIQDraVarSet.VarSet"
+  }
+  catch [Management.Automation.MethodInvocationException],[Runtime.InteropServices.COMException] {
+    throw $_
+  }
+  Write-Debug "GetDRAObject: Connect to server '$draServerName'"
+  $containers = GetDRAObject $objectType $objectName -emptyIsError
+  foreach ( $container in $containers ) {
+    switch ( $objectType ) {
+      "ActiveView" {
+        $containerObjectName = $container | Select-Object -ExpandProperty ActiveView
+        $containerName = "OnePoint://av=$(Get-EscapedName $containerObjectName),module=security"
+      }
+      "AssistantAdmin" {
+        $containerObjectName = $container | Select-Object -ExpandProperty AssistantAdmin
+        $containerName = "OnePoint://aa=$(Get-EscapedName $containerObjectName),module=security"
+      }
+    }
+    $varSetIn.put("Hints",@('$McsNameValue','Description','Comment'))
+    $varSetIn.put("OperationName","ContainerEnum")
+    $varSetIn.put("Scope",0)
+    $varSetIn.put("Container",$containerName)
+    $varSetIn.put("Filter",@("Rule(`$McsNameValue='$ruleName')"))
+    $varSetIn.put("ManagedObjectsOnly",$true)
+    $varSetOut = $eaServer.ScriptSubmit($varSetIn)
+    $lastError = $varSetOut.get("Errors.LastError")
+    if ( $lastError -eq 0 ) {
+      $objectCount = $varSetOut.get("TotalNumberObjects")
+      if ( $objectCount -gt 0 ) {
+        $tableBuffer = $varSetOut.get("IEaEnumerateBuf")
+        if ( $tableBuffer ) {
+          for ( $i = 0; $i -lt $tableBuffer.NumberOfRows; $i++ ) {
+            $outObj = [PSCustomObject] @{
+              $objectType    = $containerObjectName
+              "Rule"         = $null
+              "Description"  = $null
+              "Comment"      = $null
+            }
+            for ( $j = 0; $j -lt $tableBuffer.NumberOfColumns; $j++ ) {
+              $fieldValue = $null
+              $tableBuffer.GetField([Ref] $fieldValue)
+              switch ( $j ) {
+                0 { $outObj.Rule        = $fieldValue }
+                1 { $outObj.Description = $fieldValue }
+                2 { $outObj.Comment     = $fieldValue }
+              }
+            }
+            $outObj
+            $tableBuffer.NextRow()
+          }
+        }
+      }
+      else {
+        if ( $emptyIsError ) {
+          (Get-Variable PSCmdlet -Scope 1).Value.WriteError((New-Object Management.Automation.ErrorRecord "Rule(s) matching '$ruleName' not found in DRA $objectType '$containerObjectName'.",
+          (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
+          ([Management.Automation.ErrorCategory]::ObjectNotFound),
+          $containerObjectName))
+        }
+      }
+    }
+    else {
+      $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord ("GetDRAObjectRule returned error 0x{0:X8}." -f $lastError),
+        (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
+        ([Management.Automation.ErrorCategory]::NotSpecified),
+        $containerObjectName))
+    }
   }
 }
 
@@ -534,10 +945,11 @@ function Get-DRAActiveViewRule {
   #>
   [CmdletBinding()]
   param(
-    [Parameter(Position = 0,Mandatory = $true,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
+    [Parameter(Position = 0,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
     [SupportsWildcards()]
-    [String[]] $ActiveView,
+    [Alias("AV")]
+    [String[]] $ActiveView = "*",
 
     [Parameter(Position = 1)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
@@ -547,7 +959,7 @@ function Get-DRAActiveViewRule {
   process {
     foreach ( $activeViewItem in $ActiveView ) {
       try {
-        GetDRAObjectRule "ActiveView" $activeViewItem $Rule
+        GetDRAObjectRule "ActiveView" $activeViewItem $Rule -emptyIsError
       }
       catch {
         $PSCmdlet.WriteError($_)
@@ -584,10 +996,11 @@ function Get-DRAAssistantAdminRule {
   #>
   [CmdletBinding()]
   param(
-    [Parameter(Position = 0,Mandatory = $true,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
+    [Parameter(Position = 0,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
     [SupportsWildcards()]
-    [String[]] $AssistantAdmin,
+    [Alias("AA")]
+    [String[]] $AssistantAdmin = "*",
 
     [Parameter(Position = 1)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
@@ -597,7 +1010,7 @@ function Get-DRAAssistantAdminRule {
   process {
     foreach ( $assistantAdminItem in $AssistantAdmin ) {
       try {
-        GetDRAObjectRule "AssistantAdmin" $assistantAdminItem $Rule
+        GetDRAObjectRule "AssistantAdmin" $assistantAdminItem $Rule -emptyIsError
       }
       catch {
         $PSCmdlet.WriteError($_)
@@ -666,6 +1079,7 @@ function New-DRAActiveView {
   param(
     [Parameter(Position = 0,Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AV")]
     [String[]] $ActiveView,
 
     [String] $Description,
@@ -714,6 +1128,7 @@ function New-DRAAssistantAdmin {
   param(
     [Parameter(Position = 0,Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AA")]
     [String[]] $AssistantAdmin,
 
     [String] $Description,
@@ -788,6 +1203,7 @@ function Remove-DRAActiveView {
     [Parameter(Position = 0,Mandatory = $true,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
     [SupportsWildcards()]
+    [Alias("AV")]
     [String[]] $ActiveView
   )
   process {
@@ -833,6 +1249,7 @@ function Remove-DRAAssistantAdmin {
     [Parameter(Position = 0,Mandatory = $true,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
     [SupportsWildcards()]
+    [Alias("AA")]
     [String[]] $AssistantAdmin
   )
   process {
@@ -898,6 +1315,7 @@ function New-DRAActiveViewActiveViewRule {
     [Parameter(Position = 0,ParameterSetName = "RestrictSource",Mandatory = $true)]
     [Parameter(Position = 0,ParameterSetName = "RestrictTarget",Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AV")]
     [String] $ActiveView,
 
     [Parameter(Position = 1,ParameterSetName = "NoRestrict",Mandatory = $true)]
@@ -1015,6 +1433,7 @@ function New-DRAActiveViewDomainRule {
     [Parameter(Position = 0,ParameterSetName = "RestrictSource",Mandatory = $true)]
     [Parameter(Position = 0,ParameterSetName = "RestrictTarget",Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AV")]
     [String] $ActiveView,
 
     [Parameter(Position = 1,ParameterSetName = "NoRestrict",Mandatory = $true)]
@@ -1163,6 +1582,7 @@ function New-DRAActiveViewGroupRule {
     [Parameter(Position = 0,ParameterSetName = "RestrictSource",Mandatory = $true)]
     [Parameter(Position = 0,ParameterSetName = "RestrictTarget",Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AV")]
     [String] $ActiveView,
 
     [Parameter(Position = 1,ParameterSetName = "NoRestrict",Mandatory = $true)]
@@ -1321,6 +1741,7 @@ function New-DRAActiveViewOURule {
     [Parameter(Position = 0,ParameterSetName = "RestrictSource",Mandatory = $true)]
     [Parameter(Position = 0,ParameterSetName = "RestrictTarget",Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AV")]
     [String] $ActiveView,
 
     [Parameter(Position = 1,ParameterSetName = "NoRestrict",Mandatory = $true)]
@@ -1451,6 +1872,7 @@ function New-DRAActiveViewUserRule {
     [Parameter(Position = 0,ParameterSetName = "RestrictSource",Mandatory = $true)]
     [Parameter(Position = 0,ParameterSetName = "RestrictTarget",Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AV")]
     [String] $ActiveView,
 
     [Parameter(Position = 1,ParameterSetName = "NoRestrict",Mandatory = $true)]
@@ -1570,6 +1992,7 @@ function New-DRAAssistantAdminGroupRule {
   param(
     [Parameter(Position = 0,Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AA")]
     [String] $AssistantAdmin,
 
     [Parameter(Position = 1,Mandatory = $true)]
@@ -1674,6 +2097,7 @@ function New-DRAAssistantAdminUserRule {
   param(
     [Parameter(Position = 0,Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AA")]
     [String] $AssistantAdmin,
 
     [Parameter(Position = 1,Mandatory = $true)]
@@ -1790,6 +2214,7 @@ function Remove-DRAActiveViewRule {
     [Parameter(Position = 0,Mandatory = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
     [SupportsWildcards()]
+    [Alias("AV")]
     [String] $ActiveView,
 
     [Parameter(Position = 1,Mandatory = $true,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
@@ -1844,6 +2269,7 @@ function Remove-DRAAssistantAdminRule {
     [Parameter(Position = 0,Mandatory = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
     [SupportsWildcards()]
+    [Alias("AA")]
     [String] $AssistantAdmin,
 
     [Parameter(Position = 1,Mandatory = $true,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
@@ -1897,6 +2323,7 @@ function Grant-DRADelegation {
   param(
     [Parameter(Position = 0,Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AA")]
     [String] $AssistantAdmin,
 
     [Parameter(Position = 1,Mandatory = $true)]
@@ -1905,6 +2332,7 @@ function Grant-DRADelegation {
 
     [Parameter(Position = 2,Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AV")]
     [String] $ActiveView
   )
   if ( $PSCmdlet.ShouldProcess("DRA AssistantAdmin '$AssistantAdmin'","Grant Role '$Role' over ActiveView '$ActiveView'") ) {
@@ -1952,6 +2380,7 @@ function Revoke-DRADelegation {
   param(
     [Parameter(Position = 0,Mandatory = $true,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AA")]
     [String] $AssistantAdmin,
 
     [Parameter(Position = 1,Mandatory = $true,ValueFromPipelineByPropertyName = $true)]
@@ -1960,6 +2389,7 @@ function Revoke-DRADelegation {
 
     [Parameter(Position = 2,Mandatory = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AV")]
     [String] $ActiveView
   )
   process {
@@ -2019,7 +2449,6 @@ function RenameDRAObject {
       (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
       ([Management.Automation.ErrorCategory]::NotSpecified),
       $objectName))
-
   }
 }
 
@@ -2048,6 +2477,7 @@ function Rename-DRAActiveView {
   param(
     [Parameter(Position = 0,Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AV")]
     [String] $ActiveView,
 
     [Parameter(Position = 1,Mandatory = $true)]
@@ -2089,6 +2519,7 @@ function Rename-DRAAssistantAdmin {
   param(
     [Parameter(Position = 0,Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AA")]
     [String] $AssistantAdmin,
 
     [Parameter(Position = 1,Mandatory = $true)]
@@ -2101,6 +2532,76 @@ function Rename-DRAAssistantAdmin {
     }
     catch {
       $PSCmdlet.WriteError($_)
+    }
+  }
+}
+
+# EXPORT
+function Rename-DRARole {
+  <#
+  .SYNOPSIS
+  Renames a DRA Role object.
+
+  .DESCRIPTION
+  Renames a DRA Role object.
+
+  .PARAMETER Role
+  Specifies the name of the Role to be renamed.
+
+  .PARAMETER NewName
+  Specifies the new name of the Role.
+
+  .INPUTS
+  None
+
+  .OUTPUTS
+  None
+  #>
+  [CmdletBinding(SupportsShouldProcess = $true)]
+  param(
+    [Parameter(Position = 0,Mandatory = $true)]
+    [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [String] $Role,
+
+    [Parameter(Position = 1,Mandatory = $true)]
+    [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [String] $NewName
+  )
+  if ( $PSCmdlet.ShouldProcess("DRA Role '$Role'","Rename") ) {
+    $draServerName = (Get-DRAServer -Primary).Name
+    $eaType = [Type]::GetTypeFromProgID("EAServer.EAServe",$draServerName)
+    if ( -not $eaType ) {
+      throw [Management.Automation.ItemNotFoundException] "Computer '$draServerName' is not a DRA server, or is not reachable."
+    }
+    try {
+      $eaServer = [Activator]::CreateInstance($eaType)
+      $varSetIn = New-Object -ComObject "NetIQDraVarSet.VarSet"
+    }
+    catch [Management.Automation.MethodInvocationException] {
+      throw $_
+    }
+    Write-Debug "Rename-DRARole: Connect to server '$draServerName'"
+    $roleName = GetDRAObject "Role" $Role -emptyIsError | Select-Object -ExpandProperty Role
+    if ( $roleName ) {
+      if ( -not (GetDRAObject "Role" $NewName) ) {
+        $varSetIn.put("Role","OnePoint://role=$(Get-EscapedName $roleName),module=Security")
+        $varSetIn.put("OperationName","RoleMoveHere")
+        $varSetIn.put("NewName","role=$NewName")
+        $varSetOut = $eaServer.ScriptSubmit($varSetIn)
+        $lastError = $varSetOut.Get("Errors.LastError")
+        if ( $lastError -ne 0 ) {
+          $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord ("Rename-DRARole returned 0x{0:X8}." -f $lastError),
+            (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
+            ([Management.Automation.ErrorCategory]::NotSpecified),
+            $Role))
+        }
+      }
+      else {
+        $PSCmdlet.WriteError((New-Object Management.Automation.ErrorRecord "The Role cannot be renamed because an object with the name '$newName' already exists.",
+        $MyInvocation.MyCommand.Name,
+        ([Management.Automation.ErrorCategory]::ObjectNotFound),
+        $Role))
+      }
     }
   }
 }
@@ -2181,6 +2682,7 @@ function Rename-DRAActiveViewRule {
   param(
     [Parameter(Position = 0,Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AV")]
     [String] $ActiveView,
 
     [Parameter(Position = 1,Mandatory = $true)]
@@ -2229,6 +2731,7 @@ function Rename-DRAAssistantAdminRule {
   param(
     [Parameter(Position = 0,Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AA")]
     [String] $AssistantAdmin,
 
     [Parameter(Position = 1,Mandatory = $true)]
@@ -2308,6 +2811,7 @@ function Set-DRAActiveViewComment {
     [Parameter(Position = 0,Mandatory = $true,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
     [SupportsWildcards()]
+    [Alias("AV")]
     [String[]] $ActiveView,
 
     [Parameter(Position = 1,Mandatory = $true)]
@@ -2355,6 +2859,7 @@ function Set-DRAActiveViewDescription {
     [Parameter(Position = 0,Mandatory = $true,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
     [SupportsWildcards()]
+    [Alias("AV")]
     [String[]] $ActiveView,
 
     [Parameter(Position = 1,Mandatory = $true)]
@@ -2402,6 +2907,7 @@ function Set-DRAAssistantAdminComment {
     [Parameter(Position = 0,Mandatory = $true,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
     [SupportsWildcards()]
+    [Alias("AA")]
     [String[]] $AssistantAdmin,
 
     [Parameter(Position = 1,Mandatory = $true)]
@@ -2449,6 +2955,7 @@ function Set-DRAAssistantAdminDescription {
     [Parameter(Position = 0,Mandatory = $true,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
     [SupportsWildcards()]
+    [Alias("AA")]
     [String[]] $AssistantAdmin,
 
     [Parameter(Position = 1,Mandatory = $true)]
@@ -2503,7 +3010,7 @@ function SetDRAObjectRuleComment {
     }
   }
   if ( $result -ne 0 ) {
-    $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord $errorMsg,
+    (Get-Variable PSCmdlet -Scope 1).Value.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord $errorMsg,
       (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
       ([Management.Automation.ErrorCategory]::NotSpecified),
       $objectName))
@@ -2541,6 +3048,7 @@ function Set-DRAActiveViewRuleComment {
     [Parameter(Position = 0,Mandatory = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
     [SupportsWildcards()]
+    [Alias("AV")]
     [String] $ActiveView,
 
     [Parameter(Position = 1,Mandatory = $true,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
@@ -2597,6 +3105,7 @@ function Set-DRAAssistantAdminRuleComment {
     [Parameter(Position = 0,Mandatory = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
     [SupportsWildcards()]
+    [Alias("AA")]
     [String] $AssistantAdmin,
 
     [Parameter(Position = 1,Mandatory = $true,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
@@ -2621,4 +3130,3 @@ function Set-DRAAssistantAdminRuleComment {
     }
   }
 }
-#------------------------------------------------------------------------------
