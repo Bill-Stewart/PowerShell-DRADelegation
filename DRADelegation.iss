@@ -1,11 +1,11 @@
 #define ModuleName "DRADelegation"
 #define AppName ModuleName + " PowerShell Module"
 #define AppPublisher "Bill Stewart"
-#define AppVersion "1.5"
+#define AppVersion "1.6"
 #define InstallPath "WindowsPowerShell\Modules\" + ModuleName
 #define IconFilename "NetIQ.ico"
 #define SetupCompany "Bill Stewart (bstewart@iname.com)"
-#define SetupVersion "1.5.0.0"
+#define SetupVersion "1.6.0.0"
 
 [Setup]
 AppId={{472159EE-EB83-4332-9EED-707302449A62}
@@ -51,101 +51,110 @@ Source: "{#ModuleName}.psd1"; DestDir: "{commonpf64}\{#InstallPath}"; Check: Is6
 Source: "{#ModuleName}.psm1"; DestDir: "{commonpf64}\{#InstallPath}"; Check: Is64BitInstallMode
 
 [Code]
-Function GetWindowsPowerShellMajorVersion(): Integer;
-Var
-  RootPath, VersionString: String;
-  SubkeyNames: TArrayOfString;
-  HighestPSVersion, I, PSVersion: Integer;
-Begin
-  Result := 0;
+function GetWindowsPowerShellMajorVersion(): integer;
+  var
+    RootPath,VersionString: string;
+    SubkeyNames: TArrayOfString;
+    HighestPSVersion,I,PSVersion: integer;
+  begin
+  result := 0;
   RootPath := 'SOFTWARE\Microsoft\PowerShell';
-  If Not RegGetSubkeyNames(HKEY_LOCAL_MACHINE,RootPath,SubkeyNames) Then
-    Exit;
+  if not RegGetSubkeyNames(HKEY_LOCAL_MACHINE,RootPath,SubkeyNames) then
+    exit;
   HighestPSVersion := 0;
-  For I := 0 To GetArrayLength(SubkeyNames) - 1 Do Begin
-    If RegQueryStringValue(HKEY_LOCAL_MACHINE,RootPath + '\' + SubkeyNames[I] + '\PowerShellEngine','PowerShellVersion',VersionString) Then Begin
+  for I := 0 to GetArrayLength(SubkeyNames) - 1 do
+    begin
+    if RegQueryStringValue(HKEY_LOCAL_MACHINE,RootPath + '\' + SubkeyNames[I] + '\PowerShellEngine','PowerShellVersion',VersionString) then
+      begin
       PSVersion := StrToIntDef(Copy(VersionString,0,1),0);
-      If PSVersion > HighestPSVersion Then
+      if PSVersion > HighestPSVersion then
         HighestPSVersion := PSVersion;
-    End;
-  End;
-  Result := HighestPSVersion;
-End;
+      end;
+    end;
+  result := HighestPSVersion;
+  end;
 
-Function IsDRAServer(): Boolean;
-Var
-  EAServer: Variant;
-Begin
-  Result := False;
-  Try
+function IsDRAServer(): boolean;
+  var
+    EAServer: variant;
+  begin
+  result := false;
+  try
     EAServer := CreateOleObject('EAServer.EAServe');
-    Result := True;
-  Except
+    result := true;
+  except
+  end; //try
   End;
-End;
 
-Function BuildPath(Part1,Part2: String): String;
-Begin
-  If Part1[Length(Part1)] <> '\' Then
+function BuildPath(Part1,Part2: string): string;
+  begin
+  if Part1[Length(Part1)] <> '\' then
     Part1 := Part1 + '\';
   Result := Part1 + Part2;
-End;
+  end;
 
-Function IsEAInstalled(): Boolean;
-Var
-  RootPath, InstallDir, EAPath: String;
-Begin
-  Result := False;
+function IsEAInstalled(): boolean;
+  var
+    RootPath,InstallDir,EAPath: string;
+  begin
+  result := false;
   RootPath := 'SOFTWARE\WOW6432Node\Mission Critical Software\OnePoint\Administration';
-  If Not RegQueryStringValue(HKEY_LOCAL_MACHINE,RootPath,'InstallDir',InstallDir) Then Begin
+  if not RegQueryStringValue(HKEY_LOCAL_MACHINE,RootPath,'InstallDir',InstallDir) then
+    begin
     RootPath := 'SOFTWARE\Mission Critical Software\OnePoint\Administration';
-    If Not RegQueryStringValue(HKEY_LOCAL_MACHINE,RootPath,'InstallDir',InstallDir) Then
-      Exit;
-  End;
+    if not RegQueryStringValue(HKEY_LOCAL_MACHINE,RootPath,'InstallDir',InstallDir) then
+      exit;
+    end;
   EAPath := BuildPath(InstallDir,'EA.exe');
-  Result := FileExists(EAPath);
-End;
+  result := FileExists(EAPath);
+  end;
 
 Function InitializeSetup(): Boolean;
-Var
-  PSMajorVersion: Integer;
-Begin
+  var
+    PSMajorVersion: integer;
+  begin
   PSMajorVersion := GetWindowsPowerShellMajorVersion();
-  Result := PSMajorVersion >= 3;
-  If Not Result Then Begin
+  result := PSMajorVersion >= 3;
+  if not result then
+    begin
     Log('FATAL: Setup cannot continue because Windows PowerShell version 3.0 or later is required.');
-    If Not WizardSilent() Then Begin
+    if not WizardSilent() then
+      begin
       MsgBox('Setup cannot continue because Windows PowerShell version 3.0 or later is required.'
         + #13#10#13#10 + 'Setup will now exit.',mbCriticalError,MB_OK);
-    End;
-    Exit;
-  End;
+      end;
+    exit;
+    end;
   Log('Windows PowerShell major version ' + IntToStr(PSMajorVersion) + ' detected');
-  Result := ISDRAServer();
-  If Not Result Then Begin
+  result := ISDRAServer();
+  if not result then
+    begin
     Log('FATAL: Setup cannot continue because the current computer is not a DRA server.');
-    If Not WizardSilent() Then Begin
+    if not WizardSilent() then
+      begin
       MsgBox('Setup cannot continue because the current computer is not a DRA server.'
         + #13#10#13#10 + 'Setup will now exit.',mbCriticalError,MB_OK);
-    End;
-    Exit;
-  End;
-  Result := IsEAInstalled();
-  If Not Result Then Begin
+      end;
+    exit;
+    end;
+  result := IsEAInstalled();
+  if not result then
+    begin
     Log('FATAL: Setup cannot continue because the DRA command-line interface feature is not installed.');
-    If Not WizardSilent() Then Begin
+    if not WizardSilent() then
+      begin
       MsgBox('Setup cannot continue because the DRA command-line interface feature is not installed.'
         + #13#10#13#10 + 'Setup will now exit.',mbCriticalError,MB_OK);
-    End;
-    Exit;
-  End;
+      end;
+    exit;
+    end;
   Log('DRA command-line interface feature detected');
 End;
 
-Function GetInstallDir(Param: String): String;
-Begin
-  If Is64BitInstallMode() Then
-    Result := ExpandConstant('{commonpf64}\{#InstallPath}')
-  Else
-    Result := ExpandConstant('{commonpf32}\{#InstallPath}');
-End;
+function GetInstallDir(Param: string): string;
+  begin
+  if Is64BitInstallMode() then
+    result := ExpandConstant('{commonpf64}\{#InstallPath}')
+  else
+    result := ExpandConstant('{commonpf32}\{#InstallPath}');
+  end;

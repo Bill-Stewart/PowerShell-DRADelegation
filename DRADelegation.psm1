@@ -77,6 +77,9 @@
 # * Added "AA" as parameter alias for "AssistantAdmin"
 # * Added pipeline inputs to Get-*
 # * Cleaned up error handling (correct object names, etc.)
+#
+# 1.6 (2020-05-28)
+# * Added New-DRAAssistantAdminAARule
 
 #requires -version 3
 
@@ -486,11 +489,11 @@ function GetDRAObject {
   $varSetIn.put("Filter",$filter)
   if ( $andFilter ) { $varSetIn.put("AndFilter",$andFilter) }
   $varSetOut = $eaServer.ScriptSubmit($varSetIn)
-  $lastError = $varSetOut.Get("Errors.LastError")
+  $lastError = $varSetOut.get("Errors.LastError")
   if ( $lastError -eq 0 ) {
-    $objectCount = $varSetOut.Get("TotalNumberObjects")
+    $objectCount = $varSetOut.get("TotalNumberObjects")
     if ( $objectCount -gt 0 ) {
-      $tableBuffer = $varSetOut.Get("IEaEnumerateBuf")
+      $tableBuffer = $varSetOut.get("IEaEnumerateBuf")
       if ( $tableBuffer ) {
         for ( $i = 0; $i -lt $tableBuffer.NumberOfRows; $i++ ) {
           $outObj = [PSCustomObject] @{
@@ -773,11 +776,11 @@ function Get-DRADelegation {
       foreach ( $assistantAdminName in $assistantAdminNames ) {
         $varSetIn.put("AA","OnePoint://aa=$(Get-EscapedName $assistantAdminName),module=security")
         $varSetOut = $eaServer.ScriptSubmit($varSetIn)
-        $lastError = $varSetOut.Get("Errors.LastError")
+        $lastError = $varSetOut.get("Errors.LastError")
         if ( $lastError -eq 0 ) {
-          $objectCount = $varSetOut.Get("TotalNumberObjects")
+          $objectCount = $varSetOut.get("TotalNumberObjects")
           if ( $objectCount -gt 0 ) {
-            $tableBuffer = $varSetOut.Get("IEaEnumerateBuf")
+            $tableBuffer = $varSetOut.get("IEaEnumerateBuf")
             if ( $tableBuffer ) {
               for ( $i = 0; $i -lt $objectCount; $i++ ) {
                 $role = $null
@@ -1941,6 +1944,123 @@ function New-DRAActiveViewUserRule {
 }
 
 # EXPORT
+function New-DRAAssistantAdminAARule {
+  <#
+  .SYNOPSIS
+  Creates a new DRA AssitantAdmin rule in a DRA AssistantAdmin object.
+
+  .DESCRIPTION
+  Creates a new DRA AssitantAdmin rule in a DRA AssistantAdmin object.
+
+  .PARAMETER AssistantAdmin
+  Specifies the name of the AssistantAdmin to which the rule should be added.
+
+  .PARAMETER Rule
+  Specifies the name of the rule.
+
+  .PARAMETER Name
+  Specifies the name of the DRA AssistantAdmin to add to the new rule.
+
+  .PARAMETER MatchWildcard
+  Specifies that the -Name parameter can contain wildcard characters ('?' and '*').
+
+  .INPUTS
+  None
+
+  .OUTPUTS
+  None
+  #>
+  [CmdletBinding(SupportsShouldProcess = $true)]
+  param(
+    [Parameter(Position = 0,Mandatory = $true)]
+    [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AA")]
+    [String] $AssistantAdmin,
+
+    [Parameter(Position = 1,Mandatory = $true)]
+    [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [String] $Rule,
+
+    [Parameter(Position = 2,Mandatory = $true)]
+    [ValidateScript({Test-DRAValidObjectNameParameter $_ -wildcard})]
+    [String] $Name,
+
+    [Switch] $MatchWildcard
+  )
+  if ( $AssistantAdmin -eq $Name ) {
+    $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord "The Rule cannot be created because you cannot add a DRA AssistantAdmin as a rule for itself.",
+      $MyInvocation.MyCommand.Name,
+      ([Management.Automation.ErrorCategory]::InvalidArgument),
+      $AssistantAdmin))
+    return
+  }
+  if ( (-not $MatchWildcard) -and ($Name -match '\?|\*') ) {
+    throw [ArgumentException] "Cannot validate argument on parameter 'Name'. Wildcards are only permitted with the -MatchWildcard parameter."
+  }
+  if ( -not (GetDRAObject "AssistantAdmin" $AssistantAdmin) ) {
+    $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord "DRA AssistantAdmin '$AssistantAdmin' not found.",
+      $MyInvocation.MyCommand.Name,
+      ([Management.Automation.ErrorCategory]::ObjectNotFound),
+      $AssistantAdmin))
+    return
+  }
+  if ( -not (GetDRAObject "AssistantAdmin" $Name) ) {
+    $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord "The Rule cannot be created because no DRA AssistantAdmin matching the name '$Name' was found.",
+      $MyInvocation.MyCommand.Name,
+      ([Management.Automation.ErrorCategory]::ObjectNotFound),
+      $AssistantAdmin))
+    return
+  }
+  if ( GetDRAObjectRule "AssistantAdmin" $AssistantAdmin $Rule ) {
+    $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord "The Rule cannot be created because an object with the name '$Rule' already exists.",
+      $MyInvocation.MyCommand.Name,
+      ([Management.Automation.ErrorCategory]::ResourceExists),
+      $AssistantAdmin))
+    return
+  }
+  if ( -not $FORCE_PRIMARY ) {
+    if ( -not $draServerName ) {
+      $draServerName = (Get-DRAServer | Get-Random).Name
+    }
+  }
+  else {
+    $draServerName = (Get-DRAServer -Primary).Name
+  }
+  $eaType = [Type]::GetTypeFromProgID("EAServer.EAServe",$draServerName)
+  if ( -not $eaType ) {
+    throw [Management.Automation.ItemNotFoundException] "Computer '$draServerName' is not a DRA server, or is not reachable."
+  }
+  try {
+    $eaServer = [Activator]::CreateInstance($eaType)
+    $varSetIn = New-Object -ComObject "NetIQDraVarSet.VarSet"
+  }
+  catch [Management.Automation.MethodInvocationException],[Runtime.InteropServices.COMException] {
+    throw $_
+  }
+  Write-Debug "New-DRAAssistantAdminAARule: Connect to server '$draServerName'"
+  $varSetIn.put("Container","OnePoint://aa=$(Get-EscapedName $AssistantAdmin),module=Security")
+  $varSetIn.put("OperationName","RuleCreate")
+  $varSetIn.put("Rule","rule=$Rule")
+  $varSetIn.put("Properties.ClientFlags",0x12)
+  $varSetIn.put("Properties.Description","Include Assistant Admin Groups matching $Name")
+  $varSetIn.put("Properties.IncludeFlag",$true)
+  $varSetIn.put("Properties.NestedFlag",$true)
+  $varSetIn.put("Properties.SourceFlag",$true)
+  $varSetIn.put("Properties.TargetFlag",$true)
+  $varSetIn.put("RuleSpecification","AssistantAdminByNameRule")
+  $varSetIn.put("RuleSpecification.MatchString",$Name)
+  $varSetIn.put("RuleSpecification.SelectBase",$false)
+  $varSetOut = $eaServer.ScriptSubmit($varSetIn)
+  $lastError = $varSetOut.get("Errors.LastError")
+  if ( $lastError -ne 0 ) {
+    $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord ("New-DRAAssistantAdminAARule returned error 0x{0:X8}." -f $lastError),
+      (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
+      ([Management.Automation.ErrorCategory]::NotSpecified),
+      $objectName))
+  }
+}
+
+# EXPORT
 function New-DRAAssistantAdminGroupRule {
   <#
   .SYNOPSIS
@@ -2588,7 +2708,7 @@ function Rename-DRARole {
         $varSetIn.put("OperationName","RoleMoveHere")
         $varSetIn.put("NewName","role=$NewName")
         $varSetOut = $eaServer.ScriptSubmit($varSetIn)
-        $lastError = $varSetOut.Get("Errors.LastError")
+        $lastError = $varSetOut.get("Errors.LastError")
         if ( $lastError -ne 0 ) {
           $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord ("Rename-DRARole returned 0x{0:X8}." -f $lastError),
             (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,

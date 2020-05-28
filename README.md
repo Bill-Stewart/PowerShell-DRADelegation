@@ -20,6 +20,7 @@ New-DRAActiveViewGroupRule
 New-DRAActiveViewOURule  
 New-DRAActiveViewUserRule  
 New-DRAAssistantAdmin  
+New-DRAAssistantAdminAARule  
 New-DRAAssistantAdminGroupRule  
 New-DRAAssistantAdminUserRule  
 Remove-DRAActiveView  
@@ -39,7 +40,7 @@ Set-DRAAssistantAdminComment
 Set-DRAAssistantAdminDescription  
 Set-DRAAssistantAdminRuleComment**
 
-I wrote this module mainly because the EA.exe command-line interface is awkward and difficult to use. This module also adds some features missing from EA.exe (e.g., **Get-DRADelegation**).
+I wrote this module mainly because the EA.exe command-line interface is awkward and difficult to use. This module also adds some features missing from EA.exe.
 
 ## System Requirements
 
