@@ -7,6 +7,7 @@ Included commands:
 **Get-DRAActiveView  
 Get-DRAActiveViewRule  
 Get-DRAAssistantAdmin  
+Get-DRAAssistantAdminMember  
 Get-DRAAssistantAdminRule  
 Get-DRADelegation  
 Get-DRAPower  

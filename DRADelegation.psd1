@@ -1,6 +1,6 @@
 @{
   RootModule        = 'DRADelegation.psm1'
-  ModuleVersion     = '1.6.0.0'
+  ModuleVersion     = '1.7.0.0'
   GUID              = '553d67d3-ea5f-4bb2-8963-99d5e4b926ed'
   Author            = 'Bill Stewart'
   CompanyName       = 'Bill Stewart'
@@ -12,6 +12,7 @@
     'Get-DRAActiveView'
     'Get-DRAActiveViewRule'
     'Get-DRAAssistantAdmin'
+    'Get-DRAAssistantAdminMember'
     'Get-DRAAssistantAdminRule'
     'Get-DRADelegation'
     'Get-DRAPower'

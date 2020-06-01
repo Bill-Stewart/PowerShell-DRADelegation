@@ -1,11 +1,11 @@
 #define ModuleName "DRADelegation"
 #define AppName ModuleName + " PowerShell Module"
 #define AppPublisher "Bill Stewart"
-#define AppVersion "1.6"
+#define AppVersion "1.7"
 #define InstallPath "WindowsPowerShell\Modules\" + ModuleName
 #define IconFilename "NetIQ.ico"
 #define SetupCompany "Bill Stewart (bstewart@iname.com)"
-#define SetupVersion "1.6.0.0"
+#define SetupVersion "1.7.0.0"
 
 [Setup]
 AppId={{472159EE-EB83-4332-9EED-707302449A62}

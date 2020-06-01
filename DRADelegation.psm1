@@ -80,6 +80,9 @@
 #
 # 1.6 (2020-05-28)
 # * Added New-DRAAssistantAdminAARule
+#
+# 1.7 (2020-06-01)
+# * Added Get-DRAAssistantAdminMember
 
 #requires -version 3
 
@@ -114,19 +117,31 @@ $FORCE_PRIMARY = $true
 #------------------------------------------------------------------------------
 # CATEGORY: Pathname object support
 #------------------------------------------------------------------------------
-$ADS_ESCAPEDMODE_ON = 2
-$ADS_SETTYPE_DN = 4
-$ADS_FORMAT_X500_DN = 7
+$ADS_ESCAPEDMODE_ON  = 2
+$ADS_ESCAPEDMODE_OFF = 3
+$ADS_SETTYPE_DN      = 4
+$ADS_FORMAT_X500_DN  = 7
 
-$Pathname = New-Object -ComObject "Pathname"
-[Void] $Pathname.GetType().InvokeMember("EscapedMode","SetProperty",$null,$Pathname,$ADS_ESCAPEDMODE_ON)
+$Pathname1 = New-Object -ComObject "Pathname"
+[Void] $Pathname1.GetType().InvokeMember("EscapedMode","SetProperty",$null,$Pathname1,$ADS_ESCAPEDMODE_ON)
+
+$Pathname2 = New-Object -ComObject "Pathname"
+[Void] $Pathname2.GetType().InvokeMember("EscapedMode","SetProperty",$null,$Pathname2,$ADS_ESCAPEDMODE_OFF)
 
 function Get-EscapedName {
   param(
     [String] $distinguishedName
   )
-  [Void] $Pathname.GetType().InvokeMember("Set","InvokeMethod",$null,$Pathname,($distinguishedName,$ADS_SETTYPE_DN))
-  $Pathname.GetType().InvokeMember("Retrieve","InvokeMethod",$null,$Pathname,$ADS_FORMAT_X500_DN)
+  [Void] $Pathname1.GetType().InvokeMember("Set","InvokeMethod",$null,$Pathname1,($distinguishedName,$ADS_SETTYPE_DN))
+  $Pathname1.GetType().InvokeMember("Retrieve","InvokeMethod",$null,$Pathname1,$ADS_FORMAT_X500_DN)
+}
+
+function Get-UnescapedName {
+  param(
+    [String] $distinguishedName
+  )
+  [Void] $Pathname2.GetType().InvokeMember("Set","InvokeMethod",$null,$Pathname2,($distinguishedName,$ADS_SETTYPE_DN))
+  $Pathname2.GetType().InvokeMember("Retrieve","InvokeMethod",$null,$Pathname2,$ADS_FORMAT_X500_DN)
 }
 #------------------------------------------------------------------------------
 
@@ -622,6 +637,111 @@ function Get-DRAAssistantAdmin {
       }
       catch {
         $PSCmdlet.WriteError($_)
+      }
+    }
+  }
+}
+
+# EXPORT
+function Get-DRAAssistantAdminMember {
+  <#
+  .SYNOPSIS
+  Gets a DRA AssistantAdmin object's membership.
+
+  .DESCRIPTION
+  Gets a DRA AssistantAdmin object's membership.
+
+  .PARAMETER AssistantAdmin
+  Specifies the name of one or more DRA AssistantAdmin objects.
+
+  .INPUTS
+  * System.String
+  * Objects with property 'AssistantAdmin'
+
+  .OUTPUTS
+  Objects with the following properties:
+    AssistantAdmin     The DRA AssistantAdmin object's name
+    distinguishedName  The distinguished name of the member
+    objectClass        The object class of the member (Group or User)
+    name               The member's name attribute
+    sAMAccountName     The member's sAMAccountName attribute
+  #>
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory=$true,Position = 0,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
+    [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AA")]
+    [String[]] $AssistantAdmin
+  )
+  begin {
+    if ( -not $FORCE_PRIMARY ) {
+      if ( -not $draServerName ) {
+        $draServerName = (Get-DRAServer | Get-Random).Name
+      }
+    }
+    else {
+      $draServerName = (Get-DRAServer -Primary).Name
+    }
+    $eaType = [Type]::GetTypeFromProgID("EAServer.EAServe",$draServerName)
+    if ( -not $eaType ) {
+      throw [Management.Automation.ItemNotFoundException] "Computer '$draServerName' is not a DRA server, or is not reachable."
+    }
+    try {
+      $eaServer = [Activator]::CreateInstance($eaType)
+      $varSetIn = New-Object -ComObject "NetIQDraVarSet.VarSet"
+    }
+    catch [Management.Automation.MethodInvocationException],[Runtime.InteropServices.COMException] {
+      throw $_
+    }
+    Write-Debug "Get-DRAAssistantAdminMember: Connect to server '$draServerName'"
+    $varSetIn.put("Container","OnePoint://module=Accounts")
+    $varSetIn.put("OperationName","ContainerEnum")
+    $varSetIn.put("Hints",@('$McsPath','$McsClass','$McsFriendlyName','sAMAccountName'))
+    $varSetIn.put("ResumeStr","")
+    $varSetIn.put("Scope",0)
+    $varSetIn.put("nextrows",0)
+  }
+  process {
+    foreach ( $assistantAdminItem in $AssistantAdmin ) {
+      if ( GetDRAObject "AssistantAdmin" $assistantAdminItem -emptyIsError ) {
+        $varSetIn.put("Filter",@('',"AaMatch='$assistantAdminItem'"))
+        $varSetOut = $eaServer.ScriptSubmit($varSetIn)
+        $lastError = $varSetOut.get("Errors.LastError")
+        if ( $lastError -eq 0 ) {
+          $objectCount = $varSetOut.get("TotalNumberObjects")
+          if ( $objectCount -gt 0 ) {
+            $tableBuffer = $varSetOut.get("IEaEnumerateBuf")
+            if ( $tableBuffer ) {
+              for ( $i = 0; $i -lt $tableBuffer.NumberOfRows; $i++ ) {
+                $outObj = [PSCustomObject] @{
+                  "AssistantAdmin"    = $assistantAdminItem
+                  "distinguishedName" = $null
+                  "objectClass"       = $null
+                  "name"              = $null
+                  "sAMAccountName"    = $null
+                }
+                for ( $j = 0; $j -lt $tableBuffer.NumberOfColumns; $j++ ) {
+                  $fieldValue = $null
+                  $tableBuffer.GetField([Ref] $fieldValue)
+                  switch ( $j ) {
+                    0 { $outObj.distinguishedName = Get-UnescapedName ($fieldValue -replace '^OnePoint:\/\/','') }
+                    1 { $outObj.objectClass       = $fieldValue }
+                    2 { $outObj.name              = $fieldValue }
+                    3 { $outObj.sAMAccountName    = $fieldValue }
+                  }
+                }
+                $outObj
+                $tableBuffer.NextRow()
+              }
+            }
+          }
+        }
+        else {
+          $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord ("Get-DRAAssistantAdminMember returned error 0x{0:X8}." -f $lastError),
+            $MyInvocation.MyCommand.Name,
+            ([Management.Automation.ErrorCategory]::NotSpecified),
+            $objectName))
+        }
       }
     }
   }
@@ -2054,7 +2174,7 @@ function New-DRAAssistantAdminAARule {
   $lastError = $varSetOut.get("Errors.LastError")
   if ( $lastError -ne 0 ) {
     $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord ("New-DRAAssistantAdminAARule returned error 0x{0:X8}." -f $lastError),
-      (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
+      $MyInvocation.MyCommand.Name,
       ([Management.Automation.ErrorCategory]::NotSpecified),
       $objectName))
   }
