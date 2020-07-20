@@ -12,6 +12,7 @@ Get-DRAAssistantAdminRule
 Get-DRADelegation  
 Get-DRAPower  
 Get-DRARole  
+Get-DRARoleMember  
 Get-DRAServer  
 Grant-DRADelegation  
 New-DRAActiveView  

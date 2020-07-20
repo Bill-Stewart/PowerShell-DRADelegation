@@ -83,6 +83,9 @@
 #
 # 1.7 (2020-06-01)
 # * Added Get-DRAAssistantAdminMember
+#
+# 1.8 (2020-07-20
+# * Added Get-DRARoleMember
 
 #requires -version 3
 
@@ -668,7 +671,7 @@ function Get-DRAAssistantAdminMember {
   #>
   [CmdletBinding()]
   param(
-    [Parameter(Mandatory=$true,Position = 0,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
+    [Parameter(Mandatory = $true,Position = 0,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
     [Alias("AA")]
     [String[]] $AssistantAdmin
@@ -740,7 +743,7 @@ function Get-DRAAssistantAdminMember {
           $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord ("Get-DRAAssistantAdminMember returned error 0x{0:X8}." -f $lastError),
             $MyInvocation.MyCommand.Name,
             ([Management.Automation.ErrorCategory]::NotSpecified),
-            $objectName))
+            $assistantAdminItem))
         }
       }
     }
@@ -829,6 +832,152 @@ function Get-DRAPower {
   }
 }
 #------------------------------------------------------------------------------
+
+# EXPORT
+function Get-DRARoleMember {
+  <#
+  .SYNOPSIS
+  Gets a DRA Role object's members (Powers and Roles).
+
+  .DESCRIPTION
+  Gets a DRA Role object's members (Powers and Roles).
+
+  .PARAMETER Role
+  Specifies the name of one or more DRA Role objects.
+
+  .INPUTS
+  * System.String
+  * Objects with property 'Role'
+
+  .OUTPUTS
+  Objects with the following properties:
+  Role         The name of the Role object
+  Member       The name of the member Power or Role
+  Type         The type of the member (Power or Role)
+  Description  The description for the member
+  Comment      The comment for the member
+  #>
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $true,Position = 0,ValueFromPipeline = $true,ValueFromPipelineByPropertyName = $true)]
+    [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [String[]] $Role
+  )
+  begin {
+    if ( -not $FORCE_PRIMARY ) {
+      if ( -not $draServerName ) {
+        $draServerName = (Get-DRAServer | Get-Random).Name
+      }
+    }
+    else {
+      $draServerName = (Get-DRAServer -Primary).Name
+    }
+    $eaType = [Type]::GetTypeFromProgID("EAServer.EAServe",$draServerName)
+    if ( -not $eaType ) {
+      throw [Management.Automation.ItemNotFoundException] "Computer '$draServerName' is not a DRA server, or is not reachable."
+    }
+    try {
+      $eaServer = [Activator]::CreateInstance($eaType)
+      $varSetIn = New-Object -ComObject "NetIQDraVarSet.VarSet"
+    }
+    catch [Management.Automation.MethodInvocationException],[Runtime.InteropServices.COMException] {
+      throw $_
+    }
+    Write-Debug "Get-DRARoleMember: Connect to server '$draServerName'"
+    $varSetIn.put("OperationName","ContainerEnum")
+    $varSetIn.put("Hints",@('$McsNameValue','$McsClass','Description','Comment'))
+    $varSetIn.put("ResumeStr","")
+    $varSetIn.put("Scope",0)
+    $varSetIn.put("nextrows",-1)
+  }
+  process {
+    foreach ( $roleItem in $Role ) {
+      if ( GetDRAObject "Role" $roleItem -emptyIsError ) {
+        # Enumerate powers in role
+        $varSetIn.put("Container","OnePoint://role=$(Get-EscapedName $roleItem),module=Security")
+        $varSetIn.put("Filter",@('power',''))
+        $varSetIn.put("EnumType",0)
+        $varSetOut = $eaServer.ScriptSubmit($varSetIn)
+        $lastError = $varSetOut.get("Errors.LastError")
+        if ( $lastError -eq 0 ) {
+          $objectCount = $varSetOut.get("TotalNumberObjects")
+          if ( $objectCount -gt 0 ) {
+            $tableBuffer = $varSetOut.get("IEaEnumerateBuf")
+            if ( $tableBuffer ) {
+              for ( $i = 0; $i -lt $tableBuffer.NumberOfRows; $i++ ) {
+                $outObj = [PSCustomObject] @{
+                  "Role"              = $roleItem
+                  "Member"            = $null
+                  "Type"              = $null
+                  "Description"       = $null
+                  "Comment"           = $null
+                }
+                for ( $j = 0; $j -lt $tableBuffer.NumberOfColumns; $j++ ) {
+                  $fieldValue = $null
+                  $tableBuffer.GetField([Ref] $fieldValue)
+                  switch ( $j ) {
+                    0 { $outObj.Member         = $fieldValue }
+                    1 { $outObj.Type           = $fieldValue }
+                    2 { $outObj.Description    = $fieldValue }
+                    3 { $outObj.Comment        = $fieldValue }
+                  }
+                }
+                $outObj
+                $tableBuffer.NextRow()
+              }
+            }
+          }
+        }
+        else {
+          $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord ("Get-DRARoleMember returned error 0x{0:X8}." -f $lastError),
+            $MyInvocation.MyCommand.Name,
+            ([Management.Automation.ErrorCategory]::NotSpecified),
+            $roleItem))
+        }
+        # Enumerate roles in role
+        $varSetIn.put("Filter",@('role($McsHidden=''0'')',''))
+        $varSetIn.put("EnumType",1)
+        $varSetOut = $eaServer.ScriptSubmit($varSetIn)
+        $lastError = $varSetOut.get("Errors.LastError")
+        if ( $lastError -eq 0 ) {
+          $objectCount = $varSetOut.get("TotalNumberObjects")
+          if ( $objectCount -gt 0 ) {
+            $tableBuffer = $varSetOut.get("IEaEnumerateBuf")
+            if ( $tableBuffer ) {
+              for ( $i = 0; $i -lt $tableBuffer.NumberOfRows; $i++ ) {
+                $outObj = [PSCustomObject] @{
+                  "Role"        = $roleItem
+                  "Member"      = $null
+                  "Type"        = $null
+                  "Description" = $null
+                  "Comment"     = $null
+                }
+                for ( $j = 0; $j -lt $tableBuffer.NumberOfColumns; $j++ ) {
+                  $fieldValue = $null
+                  $tableBuffer.GetField([Ref] $fieldValue)
+                  switch ( $j ) {
+                    0 { $outObj.Member      = $fieldValue }
+                    1 { $outObj.Type        = $fieldValue }
+                    2 { $outObj.Description = $fieldValue }
+                    3 { $outObj.Comment     = $fieldValue }
+                  }
+                }
+                $outObj
+                $tableBuffer.NextRow()
+              }
+            }
+          }
+        }
+        else {
+          $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord ("Get-DRARoleMember returned error 0x{0:X8}." -f $lastError),
+            $MyInvocation.MyCommand.Name,
+            ([Management.Automation.ErrorCategory]::NotSpecified),
+            $roleItem))
+        }
+      }
+    }
+  }
+}
 
 #------------------------------------------------------------------------------
 # CATEGORY: Get delegation info

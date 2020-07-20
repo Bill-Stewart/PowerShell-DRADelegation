@@ -1,11 +1,11 @@
 #define ModuleName "DRADelegation"
 #define AppName ModuleName + " PowerShell Module"
 #define AppPublisher "Bill Stewart"
-#define AppVersion "1.7"
+#define AppVersion "1.8"
 #define InstallPath "WindowsPowerShell\Modules\" + ModuleName
 #define IconFilename "NetIQ.ico"
 #define SetupCompany "Bill Stewart (bstewart@iname.com)"
-#define SetupVersion "1.7.0.0"
+#define SetupVersion "1.8.0.0"
 
 [Setup]
 AppId={{472159EE-EB83-4332-9EED-707302449A62}
@@ -84,13 +84,13 @@ function IsDRAServer(): boolean;
     result := true;
   except
   end; //try
-  End;
+  end;
 
 function BuildPath(Part1,Part2: string): string;
   begin
   if Part1[Length(Part1)] <> '\' then
     Part1 := Part1 + '\';
-  Result := Part1 + Part2;
+  result := Part1 + Part2;
   end;
 
 function IsEAInstalled(): boolean;
@@ -109,7 +109,7 @@ function IsEAInstalled(): boolean;
   result := FileExists(EAPath);
   end;
 
-Function InitializeSetup(): Boolean;
+Function InitializeSetup(): boolean;
   var
     PSMajorVersion: integer;
   begin
@@ -149,7 +149,7 @@ Function InitializeSetup(): Boolean;
     exit;
     end;
   Log('DRA command-line interface feature detected');
-End;
+  end;
 
 function GetInstallDir(Param: string): string;
   begin
