@@ -18,11 +18,9 @@
 # Prerequisites:
 # * Current computer must be a DRA server
 # * The "command-line interface" feature must be installed
-# * DRA 9.2 (or later?)
+# * DRA 9.2 (or later)
 #
 # Current limitations:
-#
-# * Requires DRA 9.2 (or later?).
 #
 # * The module uses EA.exe for many actions, so it can be somewhat slow if
 #   EA.exe gets called repeatedly (still faster than point-and-click, though).
@@ -38,15 +36,6 @@
 #
 # * The EA.exe error messages don't align well with the PowerShell objects, but
 #   they should give enough information to tell what's wrong.
-#
-# * The Get-DRADelegation "Role" property can contain Power assignments (Power
-#   assignments are read-only for purposes of the module). For this reason,
-#   it's recommended to only create delegations using Role objects. (If you
-#   need a delegation for a single Power, create a Role for it.)
-#
-# * DRA Power objects have limited visibility and are read-only (we have
-#   Get-DRAPower and enumeration of assigned Power objects in
-#   Get-DRADelegation, but that's all for now).
 #
 # * ActiveView resource rules are not supported.
 #
@@ -84,8 +73,11 @@
 # 1.7 (2020-06-01)
 # * Added Get-DRAAssistantAdminMember
 #
-# 1.8 (2020-07-20
+# 1.8 (2020-07-20)
 # * Added Get-DRARoleMember
+#
+# 1.9 (2021-09-08)
+# * Added Power support to Grant-DRADelegation and Revoke-DRADelegation
 
 #requires -version 3
 
@@ -546,9 +538,9 @@ function GetDRAObject {
     else {
       if ( $emptyIsError ) {
         (Get-Variable PSCmdlet -Scope 1).Value.WriteError((New-Object Management.Automation.ErrorRecord "DRA $objectType '$objectName' not found.",
-        (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
-        ([Management.Automation.ErrorCategory]::ObjectNotFound),
-        $objectName))
+          (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
+          ([Management.Automation.ErrorCategory]::ObjectNotFound),
+          $objectName))
       }
     }
   }
@@ -556,6 +548,102 @@ function GetDRAObject {
     $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord ("GetDRAObject returned error 0x{0:X8}." -f $lastError),
       (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
       ([Management.Automation.ErrorCategory]::NotSpecified),
+      $objectName))
+  }
+}
+
+function GetDRAPowerOrRole {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [String] $objectName,
+
+    [String] $draServerName,
+
+    [Switch] $emptyIsError
+  )
+  if ( -not $FORCE_PRIMARY ) {
+    if ( -not $draServerName ) {
+      $draServerName = (Get-DRAServer | Get-Random).Name
+    }
+  }
+  else {
+    $draServerName = (Get-DRAServer -Primary).Name
+  }
+  $eaType = [Type]::GetTypeFromProgID("EAServer.EAServe",$draServerName)
+  if ( -not $eaType ) {
+    throw [Management.Automation.ItemNotFoundException] "Computer '$draServerName' is not a DRA server, or is not reachable."
+  }
+  try {
+    $eaServer = [Activator]::CreateInstance($eaType)
+    $varSetIn = New-Object -ComObject "NetIQDraVarSet.VarSet"
+  }
+  catch [Management.Automation.MethodInvocationException],[Runtime.InteropServices.COMException] {
+    throw $_
+  }
+  Write-Debug "GetDRAObject: Connect to server '$draServerName'"
+  $foundRoleOrPower = $false
+  $objectTypes = @("Power","Role")
+  foreach ( $objectType in $objectTypes ) {
+    switch ( $objectType ) {
+      "Power" {
+        $container = "OnePoint://module=operations"
+        $filter = @("PowerTemplate(`$McsNameValue='$objectName')")
+        $andFilter = @("PowerTemplate(`$McsIsHidden='false')")
+      }
+      "Role" {
+        $container = "OnePoint://module=security"
+        $Filter = @("Role(`$McsNameValue='$objectName')")
+        $andFilter = $null
+      }
+    }
+    $varSetIn.put("Hints",@('$McsNameValue','$McsPath'))
+    $varSetIn.put("OperationName","ContainerEnum")
+    $varSetIn.put("Scope",0)
+    $varSetIn.put("ManagedObjectsOnly",$true)
+    $varSetIn.put("Container",$container)
+    $varSetIn.put("Filter",$filter)
+    if ( $andFilter ) { $varSetIn.put("AndFilter",$andFilter) }
+    $varSetOut = $eaServer.ScriptSubmit($varSetIn)
+    $lastError = $varSetOut.get("Errors.LastError")
+    if ( $lastError -eq 0 ) {
+      $objectCount = $varSetOut.get("TotalNumberObjects")
+      if ( $objectCount -gt 0 ) {
+        $tableBuffer = $varSetOut.get("IEaEnumerateBuf")
+        if ( $tableBuffer ) {
+          $outObj = [PSCustomObject] @{
+            "ObjectType"   = $objectType
+            "Name"         = $null
+            "OnePointPath" = $null
+          }
+          for ( $i = 0; $i -lt $tableBuffer.NumberOfRows; $i++ ) {
+            for ( $j = 0; $j -lt $tableBuffer.NumberOfColumns; $j++ ) {
+              $fieldValue = $null
+              $tableBuffer.GetField([Ref] $fieldValue)
+              switch ( $j ) {
+                0 { $outObj.Name         = $fieldValue }
+                1 { $outObj.OnePointPath = $fieldValue }
+              }
+            }
+            $outObj
+            $foundRoleOrPower = $true
+            $tableBuffer.NextRow()
+          }
+        }
+      }
+    }
+    else {
+      $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord ("GetDRAPowerOrRole returned error 0x{0:X8}." -f $lastError),
+        (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
+        ([Management.Automation.ErrorCategory]::NotSpecified),
+        $objectName))
+    }
+  }
+  if ( $emptyIsError -and (-not $foundRoleOrPower) ) {
+    (Get-Variable PSCmdlet -Scope 1).Value.WriteError((New-Object Management.Automation.ErrorRecord "DRA Power or Role '$objectName' not found.",
+      (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
+      ([Management.Automation.ErrorCategory]::ObjectNotFound),
       $objectName))
   }
 }
@@ -1001,7 +1089,7 @@ function Get-DRADelegation {
   .OUTPUTS
   Objects with the following properties:
     AssistantAdmin  The AssistantAdmin to which the delegation applies
-    Role            The delegated Role (or Power)
+    Role            The delegated Power or Role
     ActiveView      The ActiveView over which the delegation applies
   #>
   [CmdletBinding()]
@@ -1068,9 +1156,9 @@ function Get-DRADelegation {
           }
           else {
             $PSCmdlet.WriteError((New-Object Management.Automation.ErrorRecord "DRA AssistantAdmin '$assistantAdminName' has no delegations.",
-            $MyInvocation.MyCommand.Name,
-            ([Management.Automation.ErrorCategory]::ObjectNotFound),
-            $assistantAdminName))
+              $MyInvocation.MyCommand.Name,
+              ([Management.Automation.ErrorCategory]::ObjectNotFound),
+              $assistantAdminName))
           }
         }
         else {
@@ -1174,9 +1262,9 @@ function GetDRAObjectRule {
       else {
         if ( $emptyIsError ) {
           (Get-Variable PSCmdlet -Scope 1).Value.WriteError((New-Object Management.Automation.ErrorRecord "Rule(s) matching '$ruleName' not found in DRA $objectType '$containerObjectName'.",
-          (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
-          ([Management.Automation.ErrorCategory]::ObjectNotFound),
-          $containerObjectName))
+            (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
+            ([Management.Automation.ErrorCategory]::ObjectNotFound),
+            $containerObjectName))
         }
       }
     }
@@ -2239,7 +2327,6 @@ function New-DRAAssistantAdminAARule {
   .OUTPUTS
   None
   #>
-  [CmdletBinding(SupportsShouldProcess = $true)]
   param(
     [Parameter(Position = 0,Mandatory = $true)]
     [ValidateScript({Test-DRAValidObjectNameParameter $_})]
@@ -2684,6 +2771,96 @@ function Remove-DRAAssistantAdminRule {
 #------------------------------------------------------------------------------
 # CATEGORY: Grant/revoke delegation
 #------------------------------------------------------------------------------
+function GrantOrRevokeDRADelegation {
+  param(
+    [Parameter(Position = 0,Mandatory = $true)]
+    [ValidateSet("Grant","Revoke")]
+    $GrantOrRevoke,
+
+    [Parameter(Position = 1,Mandatory = $true)]
+    [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AA")]
+    [String] $AssistantAdmin,
+
+    [Parameter(Position = 2,Mandatory = $true)]
+    [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [String] $PowerOrRole,
+
+    [Parameter(Position = 3,Mandatory = $true)]
+    [ValidateScript({Test-DRAValidObjectNameParameter $_})]
+    [Alias("AV")]
+    [String] $ActiveView
+  )
+  $resolvedAA = GetDRAObject AssistantAdmin $AssistantAdmin
+  if ( $null -eq $resolvedAA ) {
+    (Get-Variable PSCmdlet -Scope 1).Value.WriteError((New-Object Management.Automation.ErrorRecord "DRA AssistantAdmin '$AssistantAdmin' not found.",
+      (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
+      ([Management.Automation.ErrorCategory]::ObjectNotFound),
+      $AssistantAdmin))
+    return
+  }
+  $resolvedPowerOrRole = GetDRAPowerOrRole $Role
+  if ( $null -eq $resolvedPowerOrRole ) {
+    (Get-Variable PSCmdlet -Scope 1).Value.WriteError((New-Object Management.Automation.ErrorRecord "DRA Power or Role '$PowerOrRole' not found.",
+      (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
+      ([Management.Automation.ErrorCategory]::ObjectNotFound),
+      $PowerOrRole))
+    return
+  }
+  $resolvedAV = GetDRAObject ActiveView $ActiveView
+  if ( $null -eq $resolvedAV ) {
+    (Get-Variable PSCmdlet -Scope 1).Value.WriteError((New-Object Management.Automation.ErrorRecord "DRA ActiveView '$ActiveView' not found.",
+      (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
+      ([Management.Automation.ErrorCategory]::ObjectNotFound),
+      $ActiveView))
+    return
+  }
+  if ( -not $FORCE_PRIMARY ) {
+    if ( -not $draServerName ) {
+      $draServerName = (Get-DRAServer | Get-Random).Name
+    }
+  }
+  else {
+    $draServerName = (Get-DRAServer -Primary).Name
+  }
+  $eaType = [Type]::GetTypeFromProgID("EAServer.EAServe",$draServerName)
+  if ( -not $eaType ) {
+    throw [Management.Automation.ItemNotFoundException] "Computer '$draServerName' is not a DRA server, or is not reachable."
+  }
+  try {
+    $eaServer = [Activator]::CreateInstance($eaType)
+    $varSetIn = New-Object -ComObject "NetIQDraVarSet.VarSet"
+  }
+  catch [Management.Automation.MethodInvocationException],[Runtime.InteropServices.COMException] {
+    throw $_
+  }
+  Write-Debug "GrantOrRevokeDRADelegation: Connect to server '$draServerName'"
+  switch ( $GrantOrRevoke ) {
+    "Grant" {
+      # RoleAssociateActiveViewAssistantAdmin uses arrays for AssistantAdmin and Role
+      $varSetIn.put("AssistantAdmin",@("OnePoint://aa={0},module=Security" -f (Get-EscapedName $resolvedAA.AssistantAdmin)))
+      $varSetIn.put("Role",@("{0}" -f $resolvedPowerOrRole.OnePointPath))
+      $operationName = "RoleAssociateActiveViewAssistantAdmin"
+    }
+    "Revoke" {
+      # RoleDetachActiveViewAssistantAdmin does not use arrays for AssistantAdmin and Role
+      $varSetIn.put("AssistantAdmin","OnePoint://aa={0},module=Security" -f (Get-EscapedName $resolvedAA.AssistantAdmin))
+      $varSetIn.put("Role","{0}" -f $resolvedPowerOrRole.OnePointPath)
+      $operationName = "RoleDetachActiveViewAssistantAdmin"
+    }
+  }
+  $varSetIn.put("ActiveView","OnePoint://av={0},module=Security" -f (Get-EscapedName $resolvedAV.ActiveView))
+  $varSetIn.put("OperationName",$operationName)
+  $varSetOut = $eaServer.ScriptSubmit($varSetIn)
+  $lastError = $varSetOut.get("Errors.LastError")
+  if ( $lastError -ne 0 ) {
+    $PSCmdlet.ThrowTerminatingError((New-Object Management.Automation.ErrorRecord ("GrantOrRevokeDRADelegation returned error 0x{0:X8}." -f $lastError),
+      (Get-Variable MyInvocation -Scope 1).Value.MyCommand.Name,
+      ([Management.Automation.ErrorCategory]::NotSpecified),
+      $objectName))
+  }
+}
+
 # EXPORT
 function Grant-DRADelegation {
   <#
@@ -2694,10 +2871,10 @@ function Grant-DRADelegation {
   Grants an AssistantAdmin a delegated Role over an ActiveView.
 
   .PARAMETER AssistantAdmin
-  Specifies the name of the AssistantAdmin to which the Role will be delegated.
+  Specifies the name of the AssistantAdmin to which the Power or Role will be delegated.
 
   .PARAMETER Role
-  Specifies the name of the Role to delegate to the AssistantAdmin. (DRA Powers are not supported.)
+  Specifies the name of the Power or Role to delegate to the AssistantAdmin.
 
   .PARAMETER ActiveView
   Specifies the name of the ActiveView to which the delegation applies.
@@ -2724,15 +2901,8 @@ function Grant-DRADelegation {
     [Alias("AV")]
     [String] $ActiveView
   )
-  if ( $PSCmdlet.ShouldProcess("DRA AssistantAdmin '$AssistantAdmin'","Grant Role '$Role' over ActiveView '$ActiveView'") ) {
-    $output = $null
-    $result = Invoke-EA "AV",$ActiveView,"DELEGATE","ADMIN:$AssistantAdmin","ROLE:$Role","MODE:B" ([Ref] $output) -primary
-    if ( $result -ne 0 ) {
-      $PSCmdlet.WriteError((New-Object Management.Automation.ErrorRecord $output[$output.Count - 1],
-        $MyInvocation.MyCommand.Name,
-        ([Management.Automation.ErrorCategory]::NotSpecified),
-        $AssistantAdmin))
-    }
+  if ( $PSCmdlet.ShouldProcess("DRA AssistantAdmin '$AssistantAdmin'","Grant Power or Role '$Role' over ActiveView '$ActiveView'") ) {
+    GrantOrRevokeDRADelegation "Grant" $AssistantAdmin $Role $ActiveView
   }
 }
 
@@ -2749,7 +2919,7 @@ function Revoke-DRADelegation {
   Specifies the name of the AssistantAdmin from which to revoke the delegation.
 
   .PARAMETER Role
-  Specifies the name of the Role to be revoked. (DRA Powers are not supported.)
+  Specifies the name of the Power or Role to be revoked.
 
   .PARAMETER ActiveView
   Specifies the name of the ActiveView to which the delegation applies.
@@ -2781,28 +2951,19 @@ function Revoke-DRADelegation {
     [Alias("AV")]
     [String] $ActiveView
   )
-  process {
-    foreach ( $assistantAdminItem in $AssistantAdmin ) {
-      if ( $PSCmdlet.ShouldProcess("DRA AssistantAdmin '$assistantAdminItem'","Revoke Role '$Role' over ActiveView '$ActiveView'") ) {
-        $output = $null
-        $result = Invoke-EA "AV",$ActiveView,"REVOKE","ADMIN:$assistantAdminItem","ROLE:$Role","MODE:B" ([Ref] $output) -primary
-        if ( $result -ne 0 ) {
-          $errorMsg = $output[$output.Count - 1]
-        }
-        else {
-          if ( $output[$output.Count - 2] -match 'not associated' ) {
-            $result = 2
-            $errorMsg = "The specified delegation for DRA AssistantAdmin '$assistantAdminItem' was not found."
-          }
-        }
-        if ( $result -ne 0 ) {
-          $PSCmdlet.WriteError((New-Object Management.Automation.ErrorRecord $errorMsg,
-            $MyInvocation.MyCommand.Name,
-            ([Management.Automation.ErrorCategory]::NotSpecified),
-            $AssistantAdmin))
-        }
+  if ( $PSCmdlet.ShouldProcess("DRA AssistantAdmin '$AssistantAdmin'","Revoke Power or Role '$Role' over ActiveView '$ActiveView'") ) {
+    foreach ( $Delegation in (Get-DRADelegation $AssistantAdmin -ErrorAction SilentlyContinue) ) {
+      if ( ($Delegation.AssistantAdmin -eq $AssistantAdmin) -and
+        ($Delegation.Role -eq $Role) -and
+        ($Delegation.ActiveView -eq $ActiveView) ) {
+        GrantOrRevokeDRADelegation "Revoke" $AssistantAdmin $Role $ActiveView
+        return
       }
     }
+    $PSCmdlet.WriteError((New-Object Management.Automation.ErrorRecord "The specified delegation does not exist.",
+      $MyInvocation.MyCommand.Name,
+      ([Management.Automation.ErrorCategory]::ObjectNotFound),
+      $AssistantAdmin))
   }
 }
 #------------------------------------------------------------------------------
@@ -2987,9 +3148,9 @@ function Rename-DRARole {
       }
       else {
         $PSCmdlet.WriteError((New-Object Management.Automation.ErrorRecord "The Role cannot be renamed because an object with the name '$newName' already exists.",
-        $MyInvocation.MyCommand.Name,
-        ([Management.Automation.ErrorCategory]::ObjectNotFound),
-        $Role))
+          $MyInvocation.MyCommand.Name,
+          ([Management.Automation.ErrorCategory]::ObjectNotFound),
+          $Role))
       }
     }
   }

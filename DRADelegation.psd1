@@ -1,10 +1,10 @@
 @{
   RootModule        = 'DRADelegation.psm1'
-  ModuleVersion     = '1.8.0.0'
+  ModuleVersion     = '1.9.0.0'
   GUID              = '553d67d3-ea5f-4bb2-8963-99d5e4b926ed'
   Author            = 'Bill Stewart'
   CompanyName       = 'Bill Stewart'
-  Copyright         = '(C) 2019-2020 by Bill Stewart'
+  Copyright         = '(C) 2019-2021 by Bill Stewart'
   Description       = 'Provides management of MicroFocus/NetIQ DRA delegation details'
   PowerShellVersion = '3.0'
   AliasesToExport   = '*'
